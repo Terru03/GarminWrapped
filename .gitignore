@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+
+# Garmin Data & Reports (Sensitive)
+.garmin_tokens/
+*.csv
+*.json
+*.html
+*.txt
+*.zip
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Exceptions (Keep these)
+!requirements.txt
+!README.md
