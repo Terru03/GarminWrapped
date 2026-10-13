@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -81,6 +82,44 @@ class YearTests(unittest.TestCase):
 
 
 class DependencySetupTests(unittest.TestCase):
+    def test_accepted_downgrade_uses_fresh_process_and_propagates_child_exit(self):
+        report = load_report()
+        stale = types.ModuleType("garminconnect")
+        stale.VERSION = "0.3.17"
+        real_run = subprocess.run
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "garminconnect.py"
+
+            def install(command):
+                self.assertEqual(command, [sys.executable, "-m", "pip", "install", "-r",
+                                          str(SCRIPT.with_name("requirements.txt"))])
+                # Model pip replacing files while Python retains the imported module.
+                package.write_text("VERSION = '0.2.38'\n", encoding="utf-8")
+
+            def restart(command):
+                self.assertEqual(command, [sys.executable, str(SCRIPT), "2024"])
+                self.assertEqual(sys.modules["garminconnect"].VERSION, "0.3.17")
+                # Keep the real process boundary, replacing only account/report work
+                # with an offline import probe against the installed fixture package.
+                code = (f"import sys; sys.path.insert(0, {directory!r}); "
+                        "import garminconnect; print(garminconnect.VERSION); "
+                        "sys.exit(23 if garminconnect.VERSION == '0.2.38' else 99)")
+                child = real_run([command[0], "-I", "-c", code],
+                                 capture_output=True, text=True)
+                self.assertEqual(child.stdout.strip(), "0.2.38", child.stderr)
+                return child
+
+            with patch.dict(sys.modules, {"garminconnect": stale}), \
+                    patch.object(report, "REQUIRED_PACKAGES", {"garminconnect": "garminconnect"}), \
+                    patch("importlib.metadata.version", return_value="0.3.17"), \
+                    patch.object(sys, "prefix", directory), \
+                    patch("builtins.input", return_value="y"), \
+                    patch("subprocess.check_call", side_effect=install), \
+                    patch("subprocess.run", side_effect=restart), \
+                    patch.object(report, "main", side_effect=AssertionError("stale process reached report/login")), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(report.cli(["2024"], today=date(2026, 10, 13)), 23)
+
     def test_incompatible_installed_garmin_is_offered_compatible_requirements(self):
         report = load_report()
         with patch("importlib.metadata.version", return_value="0.3.17"), \

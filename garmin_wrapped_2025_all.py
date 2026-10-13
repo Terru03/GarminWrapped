@@ -17,7 +17,7 @@ REQUIRED_PACKAGES = {
 SUPPORTED_PYTHON = ((3, 13), (3, 14))
 
 def check_and_install_dependencies():
-    """Check if all required packages are installed, offer to install if missing."""
+    """Offer dependency setup; return True when a fresh process is required."""
     missing = []
     for import_name, pip_name in REQUIRED_PACKAGES.items():
         try:
@@ -50,6 +50,7 @@ def check_and_install_dependencies():
             try:
                 subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", str(requirements)])
                 print("\n✓ Dependencies installed successfully!\n")
+                return True
             except subprocess.CalledProcessError as e:
                 print(f"\n✗ Failed to install dependencies: {e}")
                 print("Please install manually: pip install " + " ".join(missing))
@@ -60,6 +61,7 @@ def check_and_install_dependencies():
             print("\nOr use requirements.txt:")
             print("  pip install -r requirements.txt")
             sys.exit(1)
+    return False
 
 from datetime import date, timedelta
 from pathlib import Path
@@ -94,7 +96,10 @@ def cli(argv=None, *, today=None):
     if sys.version_info[:2] not in SUPPORTED_PYTHON:
         print("Python 3.13 or 3.14 is required; other versions are unverified.", file=sys.stderr)
         return 1
-    check_and_install_dependencies()
+    if check_and_install_dependencies():
+        # pip can replace packages already cached in sys.modules. Start clean
+        # before importing the client for login, retaining the venv and year.
+        return subprocess.run([sys.executable, str(Path(__file__).resolve()), str(year)]).returncode
     main(year, today=today)
     return 0
 
@@ -925,7 +930,9 @@ def main(year=None, *, api=None, today=None):
     df["elev_m"] = pd.to_numeric(df["elevationGain"], errors="coerce").fillna(0)
     
     # Normalize activity types, using activity name to correct "other" entries
-    if "activityType" in df.columns:
+    if df.empty:
+        df["activityTypeNorm"] = pd.Series(index=df.index, dtype="string")
+    elif "activityType" in df.columns:
         df["activityTypeNorm"] = df.apply(
             lambda row: normalise_activity_type(row["activityType"], row.get("activityName", "")), 
             axis=1

@@ -128,6 +128,41 @@ class ReportTests(unittest.TestCase):
             finally:
                 os.chdir(original)
 
+    def assert_empty_activity_outputs(self, activities):
+        with tempfile.TemporaryDirectory() as directory:
+            self.generate(activities, directory)
+            root = Path(directory)
+            text = (root / "garmin_wrapped_2024_report.txt").read_text(encoding="utf-8")
+            for expected in ["Total Activities: 0", "0.0 km", "0.0 hours", "0 m",
+                             "All Sports (0 types)", "15,000 steps", "2/366 days"]:
+                self.assertIn(expected, text)
+            html = (root / "garmin_wrapped_2024_report.html").read_text(encoding="utf-8")
+            self.assertIn("15,000", html)
+            self.assertIn("Garmin Wrapped 2024", html)
+            for suffix in ["activities_raw", "monthly", "by_sport"]:
+                with (root / f"garmin_wrapped_2024_{suffix}.csv").open(newline="") as file:
+                    reader = csv.DictReader(file)
+                    self.assertTrue(reader.fieldnames)
+                    self.assertEqual(list(reader), [])
+            with (root / "garmin_wrapped_2024_wellness_parsed.csv").open(newline="") as file:
+                wellness = list(csv.DictReader(file))
+            self.assertEqual(len(wellness), 366)
+            self.assertEqual(float(wellness[0]["steps"]), 5000)
+            raw = json.loads((root / "garmin_wrapped_2024_wellness_raw.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(raw), 366)
+
+    def test_all_activities_outside_year_still_generate_empty_and_wellness_outputs(self):
+        self.assert_empty_activity_outputs([
+            {"startTimeLocal": "2025-01-01 09:00:00", "activityType": {"typeKey": "running"}},
+            {"startTimeLocal": "2023-01-01 09:00:00", "activityType": {"typeKey": "running"}},
+        ])
+
+    def test_all_activities_missing_timestamps_still_generate_empty_and_wellness_outputs(self):
+        self.assert_empty_activity_outputs([
+            {"activityType": {"typeKey": "running"}, "distance": 5000},
+            {"activityType": {"typeKey": "walking"}, "duration": 3600},
+        ])
+
 
 class ParsingTests(unittest.TestCase):
     def test_nested_and_missing_wellness_shapes(self):
