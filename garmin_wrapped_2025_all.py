@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import argparse
+import importlib.metadata
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dependency checker - ensures all required packages are installed
@@ -12,32 +14,43 @@ REQUIRED_PACKAGES = {
     "tqdm": "tqdm",
     "colorama": "colorama"
 }
+SUPPORTED_PYTHON = ((3, 13), (3, 14))
 
 def check_and_install_dependencies():
-    """Check if all required packages are installed, offer to install if missing."""
+    """Offer dependency setup; return True when a fresh process is required."""
     missing = []
     for import_name, pip_name in REQUIRED_PACKAGES.items():
         try:
             __import__(import_name)
+            if import_name == "garminconnect":
+                installed = importlib.metadata.version(import_name)
+                if tuple(installed.split(".")[:2]) != ("0", "2"):
+                    print(f"garminconnect {installed} is unsupported; this script requires 0.2.x.")
+                    missing.append(pip_name)
         except ImportError:
             missing.append(pip_name)
     
     if missing:
+        if sys.prefix == sys.base_prefix:
+            print("Missing dependencies. Use run_garmin_wrapped.bat or create a local venv first.")
+            sys.exit(1)
         print("\n" + "="*60)
-        print("  MISSING DEPENDENCIES")
+        print("  MISSING OR INCOMPATIBLE DEPENDENCIES")
         print("="*60)
         print(f"\nThe following packages are required but not installed:")
         for pkg in missing:
             print(f"  • {pkg}")
         print(f"\nWould you like to install them now?")
-        print(f"  Command: pip install {' '.join(missing)}")
+        requirements = Path(__file__).with_name("requirements.txt")
+        print(f"  Command: python -m pip install -r \"{requirements}\"")
         
         response = input("\nInstall now? [Y/n]: ").strip().lower()
         if response in ('', 'y', 'yes'):
             print("\nInstalling dependencies...")
             try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing)
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", str(requirements)])
                 print("\n✓ Dependencies installed successfully!\n")
+                return True
             except subprocess.CalledProcessError as e:
                 print(f"\n✗ Failed to install dependencies: {e}")
                 print("Please install manually: pip install " + " ".join(missing))
@@ -48,13 +61,8 @@ def check_and_install_dependencies():
             print("\nOr use requirements.txt:")
             print("  pip install -r requirements.txt")
             sys.exit(1)
+    return False
 
-# Check dependencies before importing them
-check_and_install_dependencies()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Now import the dependencies (they should be available)
-# ─────────────────────────────────────────────────────────────────────────────
 from datetime import date, timedelta
 from pathlib import Path
 import json
@@ -62,22 +70,38 @@ from typing import Any, Optional
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import pandas as pd
-from garminconnect import Garmin
-from tqdm import tqdm
-from colorama import init, Fore, Style
+def parse_year(argv=None, *, today=None):
+    """Validate CLI input before importing dependencies or accessing an account."""
+    today = today or date.today()
+    parser = argparse.ArgumentParser(description="Generate a Garmin Wrapped report.")
+    parser.add_argument("year", nargs="?", type=int, default=today.year - 1,
+                        help="1900 through the current year; default: last completed year")
+    args = parser.parse_args(argv)
+    if not 1900 <= args.year <= today.year:
+        parser.error(f"year must be between 1900 and {today.year}; future years are unavailable")
+    return args.year
 
-# Initialize colorama for Windows support
-init(autoreset=True)
 
-# Year can be passed as command line argument: python garmin_wrapped_2025_all.py 2024
-YEAR = int(sys.argv[1]) if len(sys.argv) > 1 else 2025
-START_DATE = date(YEAR, 1, 1)
-# For current year, use today's date as end if year hasn't finished
-if YEAR == date.today().year:
-    END_DATE = min(date(YEAR, 12, 31), date.today())
-else:
-    END_DATE = date(YEAR, 12, 31)
+def load_report_dependencies():
+    """Load presentation packages only when a report is requested."""
+    global pd, tqdm, Fore, Style
+    import pandas as pd
+    from tqdm import tqdm
+    from colorama import init, Fore, Style
+    init(autoreset=True)
+
+
+def cli(argv=None, *, today=None):
+    year = parse_year(argv, today=today)
+    if sys.version_info[:2] not in SUPPORTED_PYTHON:
+        print("Python 3.13 or 3.14 is required; other versions are unverified.", file=sys.stderr)
+        return 1
+    if check_and_install_dependencies():
+        # pip can replace packages already cached in sys.modules. Start clean
+        # before importing the client for login, retaining the venv and year.
+        return subprocess.run([sys.executable, str(Path(__file__).resolve()), str(year)]).returncode
+    main(year, today=today)
+    return 0
 
 TOKEN_DIR = Path(".garmin_tokens")
 
@@ -377,6 +401,7 @@ def find_sleep_score(obj: Any) -> Optional[int]:
 
 
 def login_garmin() -> Garmin:
+    from garminconnect import Garmin
     TOKEN_DIR.mkdir(exist_ok=True)
 
     api = Garmin("", "")
@@ -823,7 +848,13 @@ def generate_html_report(filename: str):
 # -----------------------------
 # Main
 # -----------------------------
-def main():
+def main(year=None, *, api=None, today=None):
+    """Generate reports; an injected client allows offline fixture generation."""
+    today = today or date.today()
+    YEAR = parse_year([] if year is None else [str(year)], today=today)
+    START_DATE = date(YEAR, 1, 1)
+    END_DATE = min(date(YEAR, 12, 31), today)
+    load_report_dependencies()
     global report_lines, html_data
     report_lines = []  # Reset for each run
     html_data = {
@@ -848,7 +879,8 @@ def main():
     add_report(f"           Period: {START_DATE} to {END_DATE}")
     add_report("=" * 60)
 
-    api = login_garmin()
+    if api is None:
+        api = login_garmin()
 
     # -------------------------
     # 1) Activities
@@ -860,7 +892,7 @@ def main():
     limit = 100
 
     start_ts = pd.Timestamp(f"{YEAR}-01-01")
-    end_ts = pd.Timestamp(f"{YEAR}-12-31 23:59:59")
+    end_ts = pd.Timestamp(END_DATE) + pd.Timedelta(days=1)
 
     with tqdm(desc="Fetching activities", unit=" batches", 
               bar_format="{l_bar}{bar:30}{r_bar}", colour="cyan") as pbar:
@@ -885,20 +917,22 @@ def main():
 
     df = pd.DataFrame(acts)
     df["startTimeLocal"] = pd.to_datetime(df.get("startTimeLocal"), errors="coerce")
-    df = df[(df["startTimeLocal"] >= start_ts) & (df["startTimeLocal"] <= end_ts)].copy()
-
-    if df.empty:
-        print("No activities found for 2025.")
-        return
+    df = df[(df["startTimeLocal"] >= start_ts) & (df["startTimeLocal"] < end_ts)].copy()
 
     df["month"] = df["startTimeLocal"].dt.to_period("M").astype(str)
-    df["distance_km"] = (pd.to_numeric(df.get("distance"), errors="coerce").fillna(0) / 1000)
-    df["duration_s"] = pd.to_numeric(df.get("duration"), errors="coerce").fillna(0)
+    # Missing numeric columns are missing measurements, not scalar values.
+    for column in ("distance", "duration", "elevationGain"):
+        if column not in df:
+            df[column] = pd.Series(index=df.index, dtype=float)
+    df["distance_km"] = (pd.to_numeric(df["distance"], errors="coerce").fillna(0) / 1000)
+    df["duration_s"] = pd.to_numeric(df["duration"], errors="coerce").fillna(0)
     df["duration_h"] = df["duration_s"] / 3600
-    df["elev_m"] = pd.to_numeric(df.get("elevationGain"), errors="coerce").fillna(0)
+    df["elev_m"] = pd.to_numeric(df["elevationGain"], errors="coerce").fillna(0)
     
     # Normalize activity types, using activity name to correct "other" entries
-    if "activityType" in df.columns:
+    if df.empty:
+        df["activityTypeNorm"] = pd.Series(index=df.index, dtype="string")
+    elif "activityType" in df.columns:
         df["activityTypeNorm"] = df.apply(
             lambda row: normalise_activity_type(row["activityType"], row.get("activityName", "")), 
             axis=1
@@ -910,7 +944,7 @@ def main():
     excluded_types = ["incident_detected", "incident detected"]
     df = df[~df["activityTypeNorm"].str.lower().isin(excluded_types)]
 
-    top_sport = df["activityTypeNorm"].value_counts().idxmax()
+    top_sport = df["activityTypeNorm"].value_counts().idxmax() if not df.empty else "N/A"
 
     print_subheader("Activity Summary")
     print_stat("Total Activities", f"{len(df):,}", "🏅")
@@ -1688,4 +1722,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(cli())
